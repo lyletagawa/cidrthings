@@ -1,0 +1,97 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross: false
+            strip: strip
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross: true
+            strip: aarch64-linux-gnu-strip
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            cross: false
+            strip: strip
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            cross: false
+            strip: strip
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            cross: false
+            strip: ""
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.cross
+        run: cargo install cross --locked
+
+      - name: Install aarch64 binutils
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: sudo apt-get install -y binutils-aarch64-linux-gnu
+
+      - name: Build
+        run: ${{ matrix.cross && 'cross' || 'cargo' }} build --release --features cli --target ${{ matrix.target }}
+
+      - name: Package (Unix)
+        if: matrix.os != 'windows-latest'
+        run: |
+          bin=target/${{ matrix.target }}/release/cidrthings
+          ${{ matrix.strip }} "$bin"
+          tar czf cidrthings-${{ matrix.target }}.tar.gz -C target/${{ matrix.target }}/release cidrthings
+          echo "ASSET=cidrthings-${{ matrix.target }}.tar.gz" >> $GITHUB_ENV
+
+      - name: Package (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $bin = "target\${{ matrix.target }}\release\cidrthings.exe"
+          Compress-Archive -Path $bin -DestinationPath "cidrthings-${{ matrix.target }}.zip"
+          echo "ASSET=cidrthings-${{ matrix.target }}.zip" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: ${{ env.ASSET }}
+
+  release:
+    name: Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Checksums
+        run: cd artifacts && sha256sum * > sha256sums.txt
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
