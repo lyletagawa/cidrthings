@@ -1,0 +1,32 @@
+[package]
+name = "cidrthings"
+version = "0.1.0"
+edition = "2021"
+description = "Compute the minimal supernet enclosing a set of CIDR blocks"
+license = "MIT"
+readme = "README.md"
+
+[[bin]]
+name = "cidrthings"
+path = "src/main.rs"
+required-features = ["cli"]
+
+[[bin]]
+name = "cidrthings-web"
+path = "src/bin/web.rs"
+required-features = ["web"]
+
+[features]
+default = ["cli"]
+cli = ["dep:clap"]
+web = ["dep:axum", "dep:tokio", "dep:serde"]
+
+[dependencies]
+clap = { version = "4", features = ["derive"], optional = true }
+axum = { version = "0.7", optional = true }
+tokio = { version = "1", features = ["full"], optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
