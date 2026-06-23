@@ -23,7 +23,7 @@ web = ["dep:axum", "dep:tokio", "dep:serde"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"], optional = true }
-axum = { version = "0.7", optional = true }
+axum = { version = "0.8", optional = true }
 tokio = { version = "1", features = ["full"], optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 
