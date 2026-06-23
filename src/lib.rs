@@ -252,6 +252,112 @@ impl fmt::Display for SupernetError {
 
 impl std::error::Error for SupernetError {}
 
+/// Summarizes each contiguous span of `cidrs` as a single supernet.
+///
+/// Blocks are sorted by network address. Adjacent or overlapping blocks are
+/// collected into a span; a gap in address space starts a new span. Each
+/// span is then reduced with [`minimal_supernet`].
+///
+/// Returns [`SupernetError::Empty`] if `cidrs` is empty, or
+/// [`SupernetError::MixedFamilies`] if it contains both IPv4 and IPv6 blocks.
+///
+/// # Examples
+///
+/// ```
+/// use cidrthings::{summarize_contiguous, Cidr};
+///
+/// let blocks: Vec<Cidr> = [
+///     "10.0.0.0/24", "10.0.1.0/24",   // contiguous → one group
+///     "192.168.0.0/24", "192.168.1.0/24", // contiguous → another group
+/// ]
+/// .iter()
+/// .map(|s| s.parse().unwrap())
+/// .collect();
+///
+/// let groups = summarize_contiguous(&blocks).unwrap();
+/// assert_eq!(groups[0].to_string(), "10.0.0.0/23");
+/// assert_eq!(groups[1].to_string(), "192.168.0.0/23");
+/// ```
+pub fn summarize_contiguous(cidrs: &[Cidr]) -> Result<Vec<Cidr>, SupernetError> {
+    if cidrs.is_empty() {
+        return Err(SupernetError::Empty);
+    }
+    let has_v4 = cidrs.iter().any(|c| matches!(c, Cidr::V4(_)));
+    let has_v6 = cidrs.iter().any(|c| matches!(c, Cidr::V6(_)));
+    if has_v4 && has_v6 {
+        return Err(SupernetError::MixedFamilies);
+    }
+    if has_v4 {
+        let mut v4: Vec<Ipv4Cidr> = cidrs
+            .iter()
+            .map(|c| match c {
+                Cidr::V4(x) => *x,
+                _ => unreachable!(),
+            })
+            .collect();
+        v4.sort_by_key(|c| u32::from(c.network));
+        Ok(group_v4(&v4).into_iter().map(Cidr::V4).collect())
+    } else {
+        let mut v6: Vec<Ipv6Cidr> = cidrs
+            .iter()
+            .map(|c| match c {
+                Cidr::V6(x) => *x,
+                _ => unreachable!(),
+            })
+            .collect();
+        v6.sort_by_key(|c| u128::from(c.network));
+        Ok(group_v6(&v6).into_iter().map(Cidr::V6).collect())
+    }
+}
+
+fn group_v4(sorted: &[Ipv4Cidr]) -> Vec<Ipv4Cidr> {
+    let mut result = Vec::new();
+    let mut group: Vec<Ipv4Cidr> = Vec::new();
+    let mut max_end: u32 = 0;
+
+    for &cidr in sorted {
+        let net = u32::from(cidr.network);
+        let bcast = u32::from(cidr.broadcast());
+        if group.is_empty() || net <= max_end.saturating_add(1) {
+            group.push(cidr);
+            max_end = max_end.max(bcast);
+        } else {
+            result.push(minimal_supernet_v4(&group));
+            group.clear();
+            group.push(cidr);
+            max_end = bcast;
+        }
+    }
+    if !group.is_empty() {
+        result.push(minimal_supernet_v4(&group));
+    }
+    result
+}
+
+fn group_v6(sorted: &[Ipv6Cidr]) -> Vec<Ipv6Cidr> {
+    let mut result = Vec::new();
+    let mut group: Vec<Ipv6Cidr> = Vec::new();
+    let mut max_end: u128 = 0;
+
+    for &cidr in sorted {
+        let net = u128::from(cidr.network);
+        let bcast = u128::from(cidr.broadcast());
+        if group.is_empty() || net <= max_end.saturating_add(1) {
+            group.push(cidr);
+            max_end = max_end.max(bcast);
+        } else {
+            result.push(minimal_supernet_v6(&group));
+            group.clear();
+            group.push(cidr);
+            max_end = bcast;
+        }
+    }
+    if !group.is_empty() {
+        result.push(minimal_supernet_v6(&group));
+    }
+    result
+}
+
 /// Returns the smallest single CIDR block that contains every block in `cidrs`.
 ///
 /// Returns [`SupernetError::Empty`] if `cidrs` is empty, or
@@ -431,5 +537,66 @@ mod tests {
     fn bare_ipv6_is_host_route() {
         let c: Cidr = "::1".parse().unwrap();
         assert_eq!(c.to_string(), "::1/128");
+    }
+
+    #[test]
+    fn summarize_contiguous_two_spans() {
+        let result = summarize_contiguous(&[
+            cidr("10.0.0.0/24"),
+            cidr("10.0.1.0/24"),
+            cidr("192.168.0.0/24"),
+            cidr("192.168.1.0/24"),
+        ])
+        .unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].to_string(), "10.0.0.0/23");
+        assert_eq!(result[1].to_string(), "192.168.0.0/23");
+    }
+
+    #[test]
+    fn summarize_contiguous_overlapping_is_one_span() {
+        let result = summarize_contiguous(&[cidr("10.0.0.0/8"), cidr("10.1.0.0/24")]).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].to_string(), "10.0.0.0/8");
+    }
+
+    #[test]
+    fn summarize_contiguous_single_block() {
+        let result = summarize_contiguous(&[cidr("10.1.0.0/24")]).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].to_string(), "10.1.0.0/24");
+    }
+
+    #[test]
+    fn summarize_contiguous_three_separate_spans() {
+        let result = summarize_contiguous(&[
+            cidr("10.0.0.0/24"),
+            cidr("172.16.0.0/16"),
+            cidr("192.168.0.0/24"),
+        ])
+        .unwrap();
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].to_string(), "10.0.0.0/24");
+        assert_eq!(result[1].to_string(), "172.16.0.0/16");
+        assert_eq!(result[2].to_string(), "192.168.0.0/24");
+    }
+
+    #[test]
+    fn summarize_contiguous_ipv6() {
+        let result = summarize_contiguous(&[cidr("2001:db8::/32"), cidr("2001:dba::/32")]).unwrap();
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn summarize_contiguous_empty_error() {
+        assert_eq!(summarize_contiguous(&[]), Err(SupernetError::Empty));
+    }
+
+    #[test]
+    fn summarize_contiguous_mixed_families_error() {
+        assert_eq!(
+            summarize_contiguous(&[cidr("10.0.0.0/8"), cidr("2001:db8::/32")]),
+            Err(SupernetError::MixedFamilies)
+        );
     }
 }

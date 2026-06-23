@@ -5,13 +5,15 @@ use axum::{
     routing::get,
     Router,
 };
-use cidrthings::{minimal_supernet, Cidr};
+use cidrthings::{minimal_supernet, summarize_contiguous, Cidr};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
 struct SupernetQuery {
     /// Comma-separated CIDR blocks, e.g. ?cidrs=10.1.0.0/24,10.2.0.0/24
     cidrs: Option<String>,
+    /// If true, summarize each contiguous run separately
+    summarize: Option<bool>,
 }
 
 fn text(status: StatusCode, body: String) -> Response {
@@ -23,10 +25,10 @@ fn text(status: StatusCode, body: String) -> Response {
         .into_response()
 }
 
-fn parse_and_summarize(input: &str) -> Response {
+fn parse_and_summarize(input: &str, summarize: bool) -> Response {
     let mut blocks: Vec<Cidr> = Vec::new();
     for s in input
-        .split(['\n', ','])
+        .split(['\n', ',', ' ', '\t'])
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
@@ -35,21 +37,35 @@ fn parse_and_summarize(input: &str) -> Response {
             Err(e) => return text(StatusCode::BAD_REQUEST, format!("error parsing {s:?}: {e}")),
         }
     }
-    match minimal_supernet(&blocks) {
-        Ok(supernet) => text(StatusCode::OK, supernet.to_string()),
-        Err(e) => text(StatusCode::BAD_REQUEST, e.to_string()),
+    if summarize {
+        match summarize_contiguous(&blocks) {
+            Ok(supernets) => text(
+                StatusCode::OK,
+                supernets
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            Err(e) => text(StatusCode::BAD_REQUEST, e.to_string()),
+        }
+    } else {
+        match minimal_supernet(&blocks) {
+            Ok(supernet) => text(StatusCode::OK, supernet.to_string()),
+            Err(e) => text(StatusCode::BAD_REQUEST, e.to_string()),
+        }
     }
 }
 
 async fn get_handler(Query(q): Query<SupernetQuery>) -> Response {
     match q.cidrs {
-        Some(s) => parse_and_summarize(&s),
+        Some(s) => parse_and_summarize(&s, q.summarize.unwrap_or(false)),
         None => Html(INDEX_HTML).into_response(),
     }
 }
 
-async fn post_handler(body: String) -> Response {
-    parse_and_summarize(&body)
+async fn post_handler(Query(q): Query<SupernetQuery>, body: String) -> Response {
+    parse_and_summarize(&body, q.summarize.unwrap_or(false))
 }
 
 const INDEX_HTML: &str = r#"<!DOCTYPE html>
@@ -62,17 +78,21 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
   body { font-family: monospace; max-width: 640px; margin: 4rem auto; padding: 0 1rem; }
   h1 { font-size: 1.2rem; }
   label { display: block; margin: 1rem 0 0.25rem; }
+  label.inline { display: inline; margin: 0; }
   textarea { width: 100%; height: 8rem; font-family: monospace; font-size: 1rem; }
   button { margin-top: 0.75rem; padding: 0.4rem 1.2rem; font-size: 1rem; cursor: pointer; }
-  #result { margin-top: 1.5rem; font-size: 1.4rem; font-weight: bold; }
+  #result { margin-top: 1.5rem; font-size: 1.4rem; font-weight: bold; white-space: pre-wrap; }
   #error { margin-top: 1rem; color: #c00; }
 </style>
 </head>
 <body>
 <h1>cidrthings — minimal supernet</h1>
-<p>Enter CIDR blocks (one per line or comma-separated) to find their minimal enclosing supernet.</p>
+<p>Enter CIDR blocks (one per line, comma-separated, or space-separated) to find their minimal enclosing supernet.</p>
 <label for="cidrs">CIDR blocks:</label>
 <textarea id="cidrs" placeholder="10.1.0.0/24&#10;10.2.0.0/24"></textarea>
+<br>
+<input type="checkbox" id="summarize">
+<label class="inline" for="summarize">Summarize contiguous blocks separately</label>
 <br>
 <button onclick="compute()">Compute supernet</button>
 <div id="result"></div>
@@ -80,10 +100,11 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
 <script>
 async function compute() {
   const raw = document.getElementById('cidrs').value.trim();
+  const summarize = document.getElementById('summarize').checked;
   document.getElementById('result').textContent = '';
   document.getElementById('error').textContent = '';
   if (!raw) { document.getElementById('error').textContent = 'Enter at least one CIDR block.'; return; }
-  const res = await fetch('/', { method: 'POST', body: raw });
+  const res = await fetch(summarize ? '/?summarize=true' : '/', { method: 'POST', body: raw });
   const text = await res.text();
   if (res.ok) {
     document.getElementById('result').textContent = text;
@@ -138,12 +159,12 @@ mod tests {
         (status, body_text(resp.into_body()).await)
     }
 
-    async fn post(body: &'static str) -> (StatusCode, String) {
+    async fn post(uri: &str, body: &'static str) -> (StatusCode, String) {
         let resp = router()
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/")
+                    .uri(uri)
                     .body(Body::from(body))
                     .unwrap(),
             )
@@ -169,40 +190,47 @@ mod tests {
 
     #[tokio::test]
     async fn post_newline_delimited() {
-        let (status, body) = post("10.1.0.0/24\n10.2.0.0/24").await;
+        let (status, body) = post("/", "10.1.0.0/24\n10.2.0.0/24").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body, "10.0.0.0/14");
     }
 
     #[tokio::test]
     async fn post_comma_delimited() {
-        let (status, body) = post("10.1.0.0/24,10.2.0.0/24").await;
+        let (status, body) = post("/", "10.1.0.0/24,10.2.0.0/24").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, "10.0.0.0/14");
+    }
+
+    #[tokio::test]
+    async fn post_whitespace_delimited() {
+        let (status, body) = post("/", "10.1.0.0/24 10.2.0.0/24").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body, "10.0.0.0/14");
     }
 
     #[tokio::test]
     async fn post_bare_ip() {
-        let (status, body) = post("10.0.0.1\n10.0.0.2").await;
+        let (status, body) = post("/", "10.0.0.1\n10.0.0.2").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body, "10.0.0.0/30");
     }
 
     #[tokio::test]
     async fn post_invalid_cidr_returns_400() {
-        let (status, _) = post("not-a-cidr").await;
+        let (status, _) = post("/", "not-a-cidr").await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
     async fn post_empty_body_returns_400() {
-        let (status, _) = post("").await;
+        let (status, _) = post("/", "").await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
     async fn post_mixed_families_returns_400() {
-        let (status, body) = post("10.0.0.0/8\n2001:db8::/32").await;
+        let (status, body) = post("/", "10.0.0.0/8\n2001:db8::/32").await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(body.contains("IPv4") || body.contains("IPv6"));
     }
@@ -224,5 +252,34 @@ mod tests {
             resp.headers().get(header::CONTENT_TYPE).unwrap(),
             "text/plain; charset=utf-8"
         );
+    }
+
+    #[tokio::test]
+    async fn get_summarize_returns_multiple_supernets() {
+        let (status, body) =
+            get("/?cidrs=10.0.0.0/24,10.0.1.0/24,192.168.0.0/24,192.168.1.0/24&summarize=true")
+                .await;
+        assert_eq!(status, StatusCode::OK);
+        let lines: Vec<&str> = body.lines().collect();
+        assert_eq!(lines, vec!["10.0.0.0/23", "192.168.0.0/23"]);
+    }
+
+    #[tokio::test]
+    async fn post_summarize_returns_multiple_supernets() {
+        let (status, body) = post(
+            "/?summarize=true",
+            "10.0.0.0/24\n10.0.1.0/24\n192.168.0.0/24\n192.168.1.0/24",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let lines: Vec<&str> = body.lines().collect();
+        assert_eq!(lines, vec!["10.0.0.0/23", "192.168.0.0/23"]);
+    }
+
+    #[tokio::test]
+    async fn post_summarize_single_group() {
+        let (status, body) = post("/?summarize=true", "10.0.0.0/24\n10.0.1.0/24").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, "10.0.0.0/23");
     }
 }

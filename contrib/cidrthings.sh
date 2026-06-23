@@ -52,6 +52,13 @@ parse_cidr() {
         echo "error: '$cidr': invalid IPv4 address" >&2; exit 1
     fi
 
+    local octet
+    for octet in ${addr//./ }; do
+        if (( octet > 255 )); then
+            echo "error: '$cidr': invalid IPv4 address (octet $octet out of range)" >&2; exit 1
+        fi
+    done
+
     if ! [[ "$prefix" =~ ^[0-9]+$ ]] || (( prefix > 32 )); then
         echo "error: '$cidr': invalid prefix length" >&2; exit 1
     fi

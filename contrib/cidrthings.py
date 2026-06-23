@@ -5,7 +5,10 @@ from ipaddress import ip_network
 if len(sys.argv) < 2:
     sys.exit("usage: cidrthings.py <cidr>...")
 
-nets = [ip_network(a, strict=False) for a in sys.argv[1:]]
+try:
+    nets = [ip_network(a, strict=False) for a in sys.argv[1:]]
+except ValueError as e:
+    sys.exit(f"error: {e}")
 if len({n.version for n in nets}) > 1:
     sys.exit("error: cannot mix IPv4 and IPv6")
 
