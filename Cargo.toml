@@ -1,6 +1,6 @@
 [package]
 name = "cidrthings"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "Compute the minimal supernet enclosing a set of CIDR blocks"
 license = "MIT"

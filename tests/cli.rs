@@ -82,21 +82,26 @@ fn ipv6() {
 fn mixed_families_exits_nonzero() {
     let (code, _, stderr) = run(&["10.0.0.0/8", "2001:db8::/32"]);
     assert_ne!(code, 0);
-    assert!(!stderr.is_empty());
+    assert_eq!(
+        stderr,
+        "error: cannot compute supernet across IPv4 and IPv6 blocks"
+    );
 }
 
 #[test]
 fn invalid_cidr_exits_nonzero() {
     let (code, _, stderr) = run(&["not-a-cidr"]);
     assert_ne!(code, 0);
-    assert!(!stderr.is_empty());
+    // CLI stderr uses the bare token (no quoting), matching the web wording
+    // minus the debug-escaping the HTTP surface applies.
+    assert_eq!(stderr, "error: not-a-cidr: invalid address: not-a-cidr");
 }
 
 #[test]
 fn version_flag() {
     let (code, stdout, _) = run(&["--version"]);
     assert_eq!(code, 0);
-    assert!(stdout.contains("0.2.0"));
+    assert!(stdout.contains("0.2.1"));
 }
 
 #[test]

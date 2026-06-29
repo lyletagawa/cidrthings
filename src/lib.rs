@@ -116,6 +116,9 @@ impl Ipv6Cidr {
     }
 
     /// The last address in the block (all host bits set).
+    ///
+    /// IPv6 has no broadcast concept; this is the highest address in the range,
+    /// analogous to the IPv4 broadcast address returned by [`Ipv4Cidr::broadcast`].
     pub fn broadcast(self) -> Ipv6Addr {
         let n = u128::from(self.network);
         let host_bits = 128 - self.prefix_len;
@@ -597,6 +600,121 @@ mod tests {
         assert_eq!(
             summarize_contiguous(&[cidr("10.0.0.0/8"), cidr("2001:db8::/32")]),
             Err(SupernetError::MixedFamilies)
+        );
+    }
+
+    #[test]
+    fn prefix_too_long_v4() {
+        let result: Result<Cidr, _> = "10.0.0.0/33".parse();
+        assert_eq!(
+            result,
+            Err(ParseError::PrefixTooLong {
+                prefix: 33,
+                max: 32
+            })
+        );
+    }
+
+    #[test]
+    fn prefix_too_long_v6() {
+        let result: Result<Cidr, _> = "2001:db8::/129".parse();
+        assert_eq!(
+            result,
+            Err(ParseError::PrefixTooLong {
+                prefix: 129,
+                max: 128
+            })
+        );
+    }
+
+    #[test]
+    fn invalid_prefix_is_reported() {
+        let result: Result<Cidr, _> = "10.0.0.0/abc".parse();
+        assert_eq!(result, Err(ParseError::InvalidPrefix("abc".to_owned())));
+    }
+
+    #[test]
+    fn invalid_address_is_reported() {
+        let result: Result<Cidr, _> = "not-a-cidr".parse();
+        assert_eq!(
+            result,
+            Err(ParseError::InvalidAddress("not-a-cidr".to_owned()))
+        );
+    }
+
+    #[test]
+    fn parse_error_display_covers_all_variants() {
+        assert_eq!(
+            ParseError::InvalidAddress("bad".into()).to_string(),
+            "invalid address: bad",
+        );
+        assert_eq!(
+            ParseError::InvalidPrefix("bad".into()).to_string(),
+            "invalid prefix length: bad",
+        );
+        assert_eq!(
+            ParseError::PrefixTooLong {
+                prefix: 33,
+                max: 32
+            }
+            .to_string(),
+            "prefix /33 exceeds maximum /32 for this address family",
+        );
+    }
+
+    #[test]
+    fn full_v4_space_collapses_to_default_route() {
+        let result = minimal_supernet(&[cidr("0.0.0.0/32"), cidr("255.255.255.255/32")]).unwrap();
+        assert_eq!(result.to_string(), "0.0.0.0/0");
+    }
+
+    #[test]
+    fn full_v6_space_collapses_to_default_route() {
+        let result = minimal_supernet(&[
+            cidr("::/128"),
+            cidr("ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/128"),
+        ])
+        .unwrap();
+        assert_eq!(result.to_string(), "::/0");
+    }
+
+    #[test]
+    fn single_host_route_is_itself() {
+        // Exercises the diff == 0 branch (prefix_len forced to 32), which a
+        // network block like /24 (used elsewhere) does not reach.
+        let result = minimal_supernet(&[cidr("10.0.0.1/32")]).unwrap();
+        assert_eq!(result.to_string(), "10.0.0.1/32");
+    }
+
+    #[test]
+    fn broadcast_v4_extremes() {
+        // /24: last address is the directed broadcast.
+        let c = Ipv4Cidr::new("10.0.0.0".parse().unwrap(), 24).unwrap();
+        assert_eq!(c.broadcast(), "10.0.0.255".parse::<Ipv4Addr>().unwrap());
+        // /32: single host, broadcast equals the address itself.
+        let h = Ipv4Cidr::new("10.0.0.1".parse().unwrap(), 32).unwrap();
+        assert_eq!(h.broadcast(), "10.0.0.1".parse::<Ipv4Addr>().unwrap());
+        // /0: the host_bits == 32 branch, yielding the all-ones address.
+        let zero = Ipv4Cidr::new("0.0.0.0".parse().unwrap(), 0).unwrap();
+        assert_eq!(
+            zero.broadcast(),
+            "255.255.255.255".parse::<Ipv4Addr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn broadcast_v6_extremes() {
+        let c = Ipv6Cidr::new("2001:db8::".parse().unwrap(), 64).unwrap();
+        assert_eq!(
+            c.broadcast(),
+            "2001:db8::ffff:ffff:ffff:ffff".parse::<Ipv6Addr>().unwrap()
+        );
+        let zero = Ipv6Cidr::new("::".parse().unwrap(), 0).unwrap();
+        assert_eq!(
+            zero.broadcast(),
+            "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"
+                .parse::<Ipv6Addr>()
+                .unwrap()
         );
     }
 }

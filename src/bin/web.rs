@@ -34,7 +34,7 @@ fn parse_and_summarize(input: &str, summarize: bool) -> Response {
     {
         match s.parse::<Cidr>() {
             Ok(c) => blocks.push(c),
-            Err(e) => return text(StatusCode::BAD_REQUEST, format!("error parsing {s:?}: {e}")),
+            Err(e) => return text(StatusCode::BAD_REQUEST, format!("error: {s:?}: {e}")),
         }
     }
     if summarize {
@@ -47,12 +47,12 @@ fn parse_and_summarize(input: &str, summarize: bool) -> Response {
                     .collect::<Vec<_>>()
                     .join("\n"),
             ),
-            Err(e) => text(StatusCode::BAD_REQUEST, e.to_string()),
+            Err(e) => text(StatusCode::BAD_REQUEST, format!("error: {e}")),
         }
     } else {
         match minimal_supernet(&blocks) {
             Ok(supernet) => text(StatusCode::OK, supernet.to_string()),
-            Err(e) => text(StatusCode::BAD_REQUEST, e.to_string()),
+            Err(e) => text(StatusCode::BAD_REQUEST, format!("error: {e}")),
         }
     }
 }
@@ -218,21 +218,27 @@ mod tests {
 
     #[tokio::test]
     async fn post_invalid_cidr_returns_400() {
-        let (status, _) = post("/", "not-a-cidr").await;
+        let (status, body) = post("/", "not-a-cidr").await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
+        // Token is debug-quoted for safe escaping on the web side.
+        assert_eq!(body, r#"error: "not-a-cidr": invalid address: not-a-cidr"#);
     }
 
     #[tokio::test]
     async fn post_empty_body_returns_400() {
-        let (status, _) = post("/", "").await;
+        let (status, body) = post("/", "").await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body, "error: no CIDR blocks provided");
     }
 
     #[tokio::test]
     async fn post_mixed_families_returns_400() {
         let (status, body) = post("/", "10.0.0.0/8\n2001:db8::/32").await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert!(body.contains("IPv4") || body.contains("IPv6"));
+        assert_eq!(
+            body,
+            "error: cannot compute supernet across IPv4 and IPv6 blocks"
+        );
     }
 
     #[tokio::test]
@@ -279,6 +285,27 @@ mod tests {
     #[tokio::test]
     async fn post_summarize_single_group() {
         let (status, body) = post("/?summarize=true", "10.0.0.0/24\n10.0.1.0/24").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, "10.0.0.0/23");
+    }
+
+    #[tokio::test]
+    async fn get_bare_ip() {
+        let (status, body) = get("/?cidrs=10.0.0.1,10.0.0.2").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, "10.0.0.0/30");
+    }
+
+    #[tokio::test]
+    async fn get_invalid_cidr_returns_400() {
+        let (status, body) = get("/?cidrs=not-a-cidr").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body, r#"error: "not-a-cidr": invalid address: not-a-cidr"#);
+    }
+
+    #[tokio::test]
+    async fn get_summarize_single_group() {
+        let (status, body) = get("/?cidrs=10.0.0.0/24,10.0.1.0/24&summarize=true").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body, "10.0.0.0/23");
     }

@@ -8,7 +8,10 @@ use std::io::{self, BufRead, IsTerminal};
     version
 )]
 struct Args {
-    /// CIDR blocks to summarize (e.g. 10.1.0.0/24 10.2.0.0/24); reads from stdin if omitted
+    /// CIDR blocks to summarize (e.g. 10.1.0.0/24 10.2.0.0/24).
+    ///
+    /// When stdin is not a terminal, blocks are also read from it (one per line,
+    /// or comma/space/tab separated) and merged with any positional arguments.
     #[arg(value_name = "CIDRs")]
     cidrs: Vec<String>,
 
